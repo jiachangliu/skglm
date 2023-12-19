@@ -22,7 +22,8 @@ from skglm.utils.jit_compilation import compiled_clone
 from skglm.solvers import AndersonCD, MultiTaskBCD
 from skglm.datafits import Cox, Quadratic, Logistic, QuadraticSVC, QuadraticMultiTask
 from skglm.penalties import (L1, WeightedL1, L1_plus_L2, L2,
-                             MCPenalty, WeightedMCPenalty, IndicatorBox, L2_1)
+                             MCPenalty, WeightedMCPenalty, IndicatorBox, L2_1,
+                             L1_centered_plus_L2)
 
 
 def _glm_fit(X, y, model, datafit, penalty, solver):
@@ -762,6 +763,384 @@ class ElasticNet(LinearModel, RegressorMixin):
             warm_start=self.warm_start, verbose=self.verbose)
         return _glm_fit(X, y, self, Quadratic(),
                         L1_plus_L2(self.alpha, self.l1_ratio, self.positive), solver)
+
+class centeredElasticNet(LinearModel, RegressorMixin):
+    r"""Elastic net estimator.
+
+    The optimization objective for Elastic net is:
+
+    .. math::
+        1 / (2 xx n_"samples") ||y - Xw||_2 ^ 2
+        + tt"l1_ratio" xx alpha ||w||_1
+        + (1 - tt"l1_ratio") xx alpha/2 ||w||_2 ^ 2
+
+    Parameters
+    ----------
+    alpha : float, optional
+        Penalty strength.
+
+    l1_ratio : float, default=0.5
+        The ElasticNet mixing parameter, with ``0 <= l1_ratio <= 1``. For
+        ``l1_ratio = 0`` the penalty is an L2 penalty. ``For l1_ratio = 1`` it
+        is an L1 penalty.  For ``0 < l1_ratio < 1``, the penalty is a
+        combination of L1 and L2.
+
+    max_iter : int, optional
+        The maximum number of iterations (subproblem definitions).
+
+    max_epochs : int
+        Maximum number of CD epochs on each subproblem.
+
+    p0 : int
+        First working set size.
+
+    verbose : bool or int
+        Amount of verbosity.
+
+    tol : float, optional
+        Stopping criterion for the optimization.
+
+    positive : bool, optional
+        When set to ``True``, forces the coefficient vector to be positive.
+
+    fit_intercept : bool, optional (default=True)
+        Whether or not to fit an intercept.
+
+    warm_start : bool, optional (default=False)
+        When set to ``True``, reuse the solution of the previous call to fit as
+        initialization, otherwise, just erase the previous solution.
+
+    ws_strategy : str
+        The score used to build the working set. Can be ``fixpoint`` or ``subdiff``.
+
+    Attributes
+    ----------
+    coef_ : array, shape (n_features,)
+        parameter vector (:math:`w` in the cost function formula)
+
+    sparse_coef_ : scipy.sparse matrix, shape (n_features, 1)
+        ``sparse_coef_`` is a readonly property derived from ``coef_``
+
+    intercept_ : float
+        constant term in decision function.
+
+    n_iter_ : int
+        Number of subproblems solved to reach the specified tolerance.
+
+    See Also
+    --------
+    Lasso : Lasso regularization.
+    """
+
+    def __init__(
+        self,
+        alpha=1.0,
+        l1_ratio=0.5,
+        max_iter=50,
+        max_epochs=50_000,
+        p0=10,
+        verbose=0,
+        tol=1e-4,
+        positive=False,
+        fit_intercept=True,
+        warm_start=False,
+        ws_strategy="subdiff",
+    ):
+        super().__init__()
+        self.alpha = alpha
+        self.l1_ratio = l1_ratio
+        self.tol = tol
+        self.max_iter = max_iter
+        self.max_epochs = max_epochs
+        self.p0 = p0
+        self.ws_strategy = ws_strategy
+        self.fit_intercept = fit_intercept
+        self.positive = positive
+        self.warm_start = warm_start
+        self.verbose = verbose
+
+    def path(self, X, y, center, alphas, coef_init=None, return_n_iter=True, **params):
+        """Compute Elastic Net path.
+
+        Parameters
+        ----------
+        X : array, shape (n_samples, n_features)
+            Design matrix.
+
+        y : array, shape (n_samples,)
+            Target vector.
+
+        center : array, shape (n_features,)
+            center vector.
+
+        alphas : array, shape (n_alphas,)
+            Grid of alpha.
+
+        coef_init : array, shape (n_features,), optional
+            If warm_start is enabled, the optimization problem restarts from coef_init.
+
+        return_n_iter : bool
+            Returns the number of iterations along the path.
+
+        **params : kwargs
+            All parameters supported by path.
+
+        Returns
+        -------
+        alphas : array, shape (n_alphas,)
+            The alphas along the path where models are computed.
+
+        coefs : array, shape (n_features, n_alphas)
+            Coefficients along the path.
+
+        stop_crit : array, shape (n_alphas,)
+            Value of stopping criterion at convergence along the path.
+
+        n_iters : array, shape (n_alphas,), optional
+            The number of iterations along the path. If return_n_iter is set to
+            ``True``.
+        """
+        penalty = compiled_clone(
+            L1_centered_plus_L2(self.alpha, self.l1_ratio, center, self.positive)
+        )
+        datafit = compiled_clone(Quadratic(), to_float32=X.dtype == np.float32)
+        solver = AndersonCD(
+            self.max_iter,
+            self.max_epochs,
+            self.p0,
+            tol=self.tol,
+            ws_strategy=self.ws_strategy,
+            fit_intercept=self.fit_intercept,
+            warm_start=self.warm_start,
+            verbose=self.verbose,
+        )
+        return solver.path(X, y, datafit, penalty, alphas, coef_init, return_n_iter)
+
+    def fit(self, X, y, center):
+        """Fit the model according to the given training data.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Training data, where n_samples is the number of samples and
+            n_features is the number of features.
+        y : array-like, shape (n_samples,)
+            Target vector relative to X.
+
+        Returns
+        -------
+        self :
+            Fitted estimator.
+        """
+        solver = AndersonCD(
+            self.max_iter,
+            self.max_epochs,
+            self.p0,
+            tol=self.tol,
+            ws_strategy=self.ws_strategy,
+            fit_intercept=self.fit_intercept,
+            warm_start=self.warm_start,
+            verbose=self.verbose,
+        )
+        return _glm_fit(
+            X,
+            y,
+            self,
+            Quadratic(),
+            L1_centered_plus_L2(self.alpha, self.l1_ratio, center, self.positive),
+            solver,
+        )
+
+
+class centeredElasticNetLogistic(LinearModel, RegressorMixin):
+    # class SparseLogisticRegression(LinearClassifierMixin, SparseCoefMixin, BaseEstimator):
+    r"""Elastic net estimator.
+
+    The optimization objective for Elastic net is:
+
+    .. math::
+        1 / (2 xx n_"samples") ||y - Xw||_2 ^ 2
+        + tt"l1_ratio" xx alpha ||w||_1
+        + (1 - tt"l1_ratio") xx alpha/2 ||w||_2 ^ 2
+
+    Parameters
+    ----------
+    alpha : float, optional
+        Penalty strength.
+
+    l1_ratio : float, default=0.5
+        The ElasticNet mixing parameter, with ``0 <= l1_ratio <= 1``. For
+        ``l1_ratio = 0`` the penalty is an L2 penalty. ``For l1_ratio = 1`` it
+        is an L1 penalty.  For ``0 < l1_ratio < 1``, the penalty is a
+        combination of L1 and L2.
+
+    max_iter : int, optional
+        The maximum number of iterations (subproblem definitions).
+
+    max_epochs : int
+        Maximum number of CD epochs on each subproblem.
+
+    p0 : int
+        First working set size.
+
+    verbose : bool or int
+        Amount of verbosity.
+
+    tol : float, optional
+        Stopping criterion for the optimization.
+
+    positive : bool, optional
+        When set to ``True``, forces the coefficient vector to be positive.
+
+    fit_intercept : bool, optional (default=True)
+        Whether or not to fit an intercept.
+
+    warm_start : bool, optional (default=False)
+        When set to ``True``, reuse the solution of the previous call to fit as
+        initialization, otherwise, just erase the previous solution.
+
+    ws_strategy : str
+        The score used to build the working set. Can be ``fixpoint`` or ``subdiff``.
+
+    Attributes
+    ----------
+    coef_ : array, shape (n_features,)
+        parameter vector (:math:`w` in the cost function formula)
+
+    sparse_coef_ : scipy.sparse matrix, shape (n_features, 1)
+        ``sparse_coef_`` is a readonly property derived from ``coef_``
+
+    intercept_ : float
+        constant term in decision function.
+
+    n_iter_ : int
+        Number of subproblems solved to reach the specified tolerance.
+
+    See Also
+    --------
+    Lasso : Lasso regularization.
+    """
+
+    def __init__(
+        self,
+        alpha=1.0,
+        l1_ratio=0.5,
+        max_iter=50,
+        max_epochs=50_000,
+        p0=10,
+        verbose=0,
+        tol=1e-4,
+        positive=False,
+        fit_intercept=True,
+        warm_start=False,
+        ws_strategy="subdiff",
+    ):
+        super().__init__()
+        self.alpha = alpha
+        self.l1_ratio = l1_ratio
+        self.tol = tol
+        self.max_iter = max_iter
+        self.max_epochs = max_epochs
+        self.p0 = p0
+        self.ws_strategy = ws_strategy
+        self.fit_intercept = fit_intercept
+        self.positive = positive
+        self.warm_start = warm_start
+        self.verbose = verbose
+
+    def path(self, X, y, center, alphas, coef_init=None, return_n_iter=True, **params):
+        """Compute Elastic Net path.
+
+        Parameters
+        ----------
+        X : array, shape (n_samples, n_features)
+            Design matrix.
+
+        y : array, shape (n_samples,)
+            Target vector.
+
+        center : array, shape (n_features,)
+            center vector.
+
+        alphas : array, shape (n_alphas,)
+            Grid of alpha.
+
+        coef_init : array, shape (n_features,), optional
+            If warm_start is enabled, the optimization problem restarts from coef_init.
+
+        return_n_iter : bool
+            Returns the number of iterations along the path.
+
+        **params : kwargs
+            All parameters supported by path.
+
+        Returns
+        -------
+        alphas : array, shape (n_alphas,)
+            The alphas along the path where models are computed.
+
+        coefs : array, shape (n_features, n_alphas)
+            Coefficients along the path.
+
+        stop_crit : array, shape (n_alphas,)
+            Value of stopping criterion at convergence along the path.
+
+        n_iters : array, shape (n_alphas,), optional
+            The number of iterations along the path. If return_n_iter is set to
+            ``True``.
+        """
+        penalty = compiled_clone(
+            L1_centered_plus_L2(self.alpha, self.l1_ratio, center, self.positive)
+        )
+        # datafit = compiled_clone(Quadratic(), to_float32=X.dtype == np.float32)
+        datafit = compiled_clone(Logistic(), to_float32=X.dtype == np.float32)
+        solver = AndersonCD(
+            self.max_iter,
+            self.max_epochs,
+            self.p0,
+            tol=self.tol,
+            ws_strategy=self.ws_strategy,
+            fit_intercept=self.fit_intercept,
+            warm_start=self.warm_start,
+            verbose=self.verbose,
+        )
+        return solver.path(X, y, datafit, penalty, alphas, coef_init, return_n_iter)
+
+    def fit(self, X, y, center):
+        """Fit the model according to the given training data.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Training data, where n_samples is the number of samples and
+            n_features is the number of features.
+        y : array-like, shape (n_samples,)
+            Target vector relative to X.
+
+        Returns
+        -------
+        self :
+            Fitted estimator.
+        """
+        solver = AndersonCD(
+            self.max_iter,
+            self.max_epochs,
+            self.p0,
+            tol=self.tol,
+            ws_strategy=self.ws_strategy,
+            fit_intercept=self.fit_intercept,
+            warm_start=self.warm_start,
+            verbose=self.verbose,
+        )
+        return _glm_fit(
+            X,
+            y,
+            self,
+            # Quadratic(),
+            Logistic(),
+            L1_centered_plus_L2(self.alpha, self.l1_ratio, center, self.positive),
+            solver,
+        )
 
 
 class MCPRegression(LinearModel, RegressorMixin):

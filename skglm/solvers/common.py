@@ -78,6 +78,31 @@ def construct_grad(X, y, w, Xw, datafit, ws):
         grad[idx] = datafit.gradient_scalar(X, y, w, Xw, j)
     return grad
 
+@njit
+def construct_full_grad(X, y, Xw, datafit):
+    """Compute the gradient of the datafit restricted to the working set.
+
+    Parameters
+    ----------
+    X : array, shape (n_samples, n_features)
+        Design matrix.
+
+    y : array, shape (n_samples,)
+        Target vector.
+
+    Xw : array, shape (n_samples, )
+        Model fit.
+
+    datafit : Datafit
+        Datafit.
+
+    Returns
+    -------
+    grad : array, shape (ws_size, n_tasks)
+        The gradient restricted to the working set, the working set is full in this case.
+    """
+    grad = datafit.gradient(X, y, Xw)
+    return grad
 
 @njit
 def construct_grad_sparse(data, indptr, indices, y, w, Xw, datafit, ws):

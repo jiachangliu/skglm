@@ -3,7 +3,8 @@ from numba import njit
 from scipy import sparse
 from sklearn.utils import check_array
 from skglm.solvers.common import (
-    construct_grad, construct_grad_sparse, dist_fix_point_cd
+    construct_grad, construct_grad_sparse, dist_fix_point_cd,
+    construct_full_grad
 )
 from skglm.solvers.base import BaseSolver
 from skglm.utils.anderson import AndersonAcceleration
@@ -98,7 +99,8 @@ class AndersonCD(BaseSolver):
                 grad = datafit.full_grad_sparse(
                     X.data, X.indptr, X.indices, y, Xw)
             else:
-                grad = construct_grad(X, y, w[:n_features], Xw, datafit, all_feats)
+                # grad = construct_grad(X, y, w[:n_features], Xw, datafit, all_feats)
+                grad = construct_full_grad(X, y, Xw, datafit)
 
             # The intercept is not taken into account in the optimality conditions since
             # the derivative w.r.t. to the intercept may be very large. It is not likely
